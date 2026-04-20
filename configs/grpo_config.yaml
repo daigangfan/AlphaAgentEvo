@@ -1,13 +1,15 @@
 # AlphaAgentEvo GRPO Training Configuration
-# Target: RTX 5090 32GB, single GPU
+# Target: RTX 4080 16GB, single GPU  (see PLAN.md for memory budget)
+# Model path can be overridden at runtime with the MODEL_PATH env variable.
 
 model:
-  name: /home/dc_analyst/models/Qwen3-4B-Thinking-2507  # Thinking variant (matches original paper)
+  name: F:\projects\models\Qwen3.5-4B 
   flash_attn: false          # Disable until flash-attn is installed for sm_120
+  quantization: nf4          # "nf4" -> 4-bit QLoRA via bitsandbytes; null -> bf16 (RTX 5090)
 
 lora:
-  r: 64
-  alpha: 128
+  r: 16                       # QLoRA rank (smoke test); bump to 64 on 24GB+ GPUs
+  alpha: 32                   # Keep alpha / r = 2
   dropout: 0.05
   target_modules:
     - q_proj
@@ -19,15 +21,16 @@ lora:
     - down_proj
 
 training:
-  num_generations: 4           # GRPO group size (completions per prompt)
-  max_new_tokens: 5000         # Max tokens per completion (reduced for speed)
-  max_tool_calling_iterations: 3  # Multi-turn tool calling iterations per generation
+  num_generations: 2            # GRPO group size (min valid is 2)
+  max_new_tokens: 768           # Max tokens per completion (fits on 16GB)
+  max_tool_calling_iterations: 2  # Multi-turn tool calling iterations per generation
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 4
+  gradient_checkpointing: true  # Recompute activations in backward pass
   num_train_epochs: 1
-  max_steps: 150               # Total training steps
+  max_steps: 150                # Total training steps
   learning_rate: 1.0e-6
-  bf16: true
+  bf16: true                    # bf16 compute (LoRA weights + QLoRA compute dtype)
   logging_steps: 1
   save_steps: 50
   save_total_limit: 3

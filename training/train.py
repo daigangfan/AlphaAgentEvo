@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -320,12 +321,14 @@ def main():
 
     # --- Import heavy dependencies ---
     from datasets import Dataset
-    from peft import LoraConfig
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import LoraConfig, prepare_model_for_kbit_training
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from trl import GRPOConfig, GRPOTrainer
 
     # --- Load model + tokenizer ---
-    model_name = model_config["name"]
+    # Allow MODEL_PATH env var to override the config (useful on machines
+    # that do not have the paper's pinned Linux path).
+    model_name = os.environ.get("MODEL_PATH") or model_config["name"]
     print(f"\n[1/5] Loading model: {model_name}")
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -348,13 +351,43 @@ def main():
         tokenizer.chat_template = base_tokenizer.chat_template
         del base_tokenizer
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True,
-        attn_implementation="flash_attention_2" if model_config.get("flash_attn", False) else "sdpa",
-    )
+    # --- QLoRA branch: 4-bit NF4 quantization for <=16 GB GPUs ---
+    quantization = (model_config.get("quantization") or "").lower()
+    use_grad_ckpt = bool(training_config.get("gradient_checkpointing", False))
+    attn_impl = "flash_attention_2" if model_config.get("flash_attn", False) else "sdpa"
+
+    if quantization == "nf4":
+        print("  [QLoRA] Loading base model in 4-bit NF4 (bitsandbytes)...")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
+            attn_implementation=attn_impl,
+        )
+        model = prepare_model_for_kbit_training(
+            model,
+            use_gradient_checkpointing=use_grad_ckpt,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+            attn_implementation=attn_impl,
+        )
+        if use_grad_ckpt:
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+            model.config.use_cache = False
 
     # --- Apply LoRA ---
     print("[2/5] Applying LoRA...")
@@ -411,6 +444,8 @@ def main():
         max_tool_calling_iterations=training_config.get("max_tool_calling_iterations", 3),
         per_device_train_batch_size=training_config.get("per_device_train_batch_size", 1),
         gradient_accumulation_steps=training_config.get("gradient_accumulation_steps", 4),
+        gradient_checkpointing=use_grad_ckpt,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if use_grad_ckpt else None,
         num_train_epochs=training_config.get("num_train_epochs", 1),
         max_steps=training_config.get("max_steps", -1),
         learning_rate=float(training_config.get("learning_rate", 1e-6)),

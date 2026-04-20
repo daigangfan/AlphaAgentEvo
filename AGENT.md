@@ -1,0 +1,1 @@
+when you do some plan or modify on this project, always read @docs/10_AGENT_GUIDE.md
