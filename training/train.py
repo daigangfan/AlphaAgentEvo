@@ -7,11 +7,40 @@ Usage:
     python training/train.py [--config configs/grpo_config.yaml]
 """
 
+import os
+import sys
+
+# ---------------------------------------------------------------------------
+# Force UTF-8 mode before ANY other imports.
+#
+# On Windows (cp936 / gbk locale) Python's default text encoding is NOT UTF-8.
+# Third-party packages (e.g. trl.chat_template_utils) call Path.read_text()
+# on .jinja templates without an explicit encoding, which raises
+# UnicodeDecodeError: 'gbk' codec can't decode byte 0x9c.
+#
+# The robust fix is Python's built-in UTF-8 Mode (PEP 540). If we're not
+# already in it, re-exec ourselves with `-X utf8` so every subsequent
+# `open()` / `read_text()` defaults to UTF-8.
+# ---------------------------------------------------------------------------
+if sys.flags.utf8_mode == 0 and os.environ.get("PYTHONUTF8") != "1":
+    os.environ["PYTHONUTF8"] = "1"
+    # Be lenient when decoding stdout of subprocesses whose output is not
+    # UTF-8 (Windows CLI tools such as nvcc / nvidia-smi still emit GBK).
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8:replace")
+    os.execv(sys.executable, [sys.executable, "-X", "utf8", *sys.argv])
+
+# Belt-and-suspenders: once we're running in UTF-8 mode, make our own
+# stdout / stderr tolerant of undecodable bytes so subprocess reader
+# threads that inherit them don't crash on stray GBK characters.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 import argparse
 import json
-import os
 import re
-import sys
 import time
 from pathlib import Path
 

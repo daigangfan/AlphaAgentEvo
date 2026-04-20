@@ -4,6 +4,12 @@
 
 set -e
 
+# Force Python to run in UTF-8 mode (PEP 540). Required on Windows (cp936 /
+# gbk) so that third-party .read_text() calls on .jinja templates don't blow
+# up with UnicodeDecodeError. Harmless on Linux/macOS.
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
