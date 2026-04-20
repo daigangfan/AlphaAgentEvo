@@ -105,6 +105,61 @@ def load_data(data_path: str | Path | None = None) -> pd.DataFrame:
     return _cached_df
 
 
+def _compute_ic(
+    factor_values: pd.Series,
+    df: pd.DataFrame,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> tuple[float, float]:
+    """Compute cross-sectional IC: Spearman(factor_t, 1-day forward return_{t+1}).
+
+    For each trading date in the period, compute the cross-sectional
+    Spearman rank correlation between factor values and 1-day forward
+    returns.  Return (ic_mean, ic_std) of the resulting daily IC series.
+    Returns (0.0, 0.0) on error or insufficient data.
+    """
+    try:
+        if '$close' not in df.columns:
+            return 0.0, 0.0
+
+        close_wide = df['$close'].unstack('instrument')
+        # 1-day forward return: (close_{t+1} / close_t) - 1
+        fwd_return = close_wide.shift(-1) / close_wide - 1
+
+        factor_wide = factor_values.unstack('instrument')
+
+        # Restrict to evaluation period
+        all_dates = factor_wide.index
+        if start_date:
+            all_dates = all_dates[all_dates >= pd.Timestamp(start_date)]
+        if end_date:
+            all_dates = all_dates[all_dates <= pd.Timestamp(end_date)]
+
+        ic_list: list[float] = []
+        for date in all_dates:
+            if date not in fwd_return.index:
+                continue
+            f = factor_wide.loc[date].dropna()
+            r = fwd_return.loc[date].reindex(f.index).dropna()
+            common = f.index.intersection(r.index)
+            if len(common) < 5:
+                continue
+            # Spearman correlation via rank
+            ic = f[common].rank().corr(r[common].rank())
+            if pd.notna(ic):
+                ic_list.append(float(ic))
+
+        if not ic_list:
+            return 0.0, 0.0
+
+        ic_mean = float(np.mean(ic_list))
+        ic_std = float(np.std(ic_list, ddof=1)) if len(ic_list) > 1 else 0.0
+        return round(ic_mean, 6), round(ic_std, 6)
+
+    except Exception:
+        return 0.0, 0.0
+
+
 def execute_expression(factor_expr: str, data_path: str | Path | None = None,
                        period: str | None = None) -> dict:
     """Execute a factor expression and compute IC/IR metrics.
@@ -215,11 +270,18 @@ def execute_expression(factor_expr: str, data_path: str | Path | None = None,
             end_date=end_date,
         )
 
+        # Compute IC metrics (required by EvaluateResponse schema)
+        ic_mean, ic_std = _compute_ic(
+            factor_values, df, start_date=start_date, end_date=end_date
+        )
+
         exec_time = time.time() - start_time
 
         return {
             'success': result['success'],
             'score': result['ir'],
+            'ic_mean': ic_mean,
+            'ic_std': ic_std,
             'ir': result['ir'],
             'annualized_return': result.get('annualized_return', 0.0),
             'annualized_volatility': result.get('annualized_volatility', 0.0),
